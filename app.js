@@ -17,12 +17,12 @@ app.use(express.json());
 
 const client = new Client({
     authStrategy: new LocalAuth(),
-    // proxyAuthentication: { username: 'username', password: 'password' },
     puppeteer: { 
-        // args: ['--proxy-server=proxy-server-that-requires-authentication.example.com'],
         headless: true,
+        args: ['--no-sandbox', '--disable-setuid-sandbox']
     }
 });
+
 
 // client initialize does not finish at ready now.
 
