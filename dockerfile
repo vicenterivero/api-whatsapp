@@ -1,6 +1,6 @@
 FROM node:18-slim
 
-# Instalar librerías necesarias para Puppeteer/Chromium
+# Instalar dependencias necesarias para Chromium
 RUN apt-get update && apt-get install -y \
     wget \
     ca-certificates \
@@ -18,24 +18,27 @@ RUN apt-get update && apt-get install -y \
     libxcomposite1 \
     libxdamage1 \
     libxrandr2 \
+    libgbm1 \
+    libxshmfence1 \
+    libdrm2 \
     xdg-utils \
     --no-install-recommends && \
     apt-get clean && rm -rf /var/lib/apt/lists/*
 
-# Crear carpeta de trabajo
+# Crear directorio de trabajo
 WORKDIR /app
 
-# Copiar package.json y lock
+# Copiar package.json y package-lock.json
 COPY package*.json ./
 
-# Instalar dependencias de Node
+# Instalar dependencias de Node.js
 RUN npm install
 
-# Copiar resto del código
+# Copiar el resto del código fuente
 COPY . .
 
 # Exponer el puerto
 EXPOSE 3000
 
-# Iniciar la app
-CMD ["node", "index.js"]
+# Ejecutar la aplicación
+CMD ["node", "app.js"]

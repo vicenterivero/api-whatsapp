@@ -1,0 +1,11 @@
+services:
+  whatsapp-bot:
+    build: .
+    container_name: whatsapp-bot
+    ports:
+      - "3000:3000"
+    env_file:
+      - .env
+    volumes:
+      - .wwebjs_auth:/home/node/.wwebjs_auth  # Para que la sesión de WhatsApp se mantenga
+    restart: unless-stopped
