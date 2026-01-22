@@ -1,774 +1,173 @@
 const express = require('express');
 const axios = require('axios');
 const mime = require('mime-types');  
-const app = express();
 const fs = require('fs');
 const path = require('path');
 const { exec } = require('child_process');
 const qrcode = require('qrcode');
 const crypto = require('crypto');
+const jwt = require('jsonwebtoken');
 require('dotenv').config();
 
-const { Client, Location, Poll, List, Buttons, LocalAuth,MessageMedia  } = require('whatsapp-web.js');
-const jwt = require('jsonwebtoken');
+const { Client, Location, Poll, List, Buttons, LocalAuth, MessageMedia } = require('whatsapp-web.js');
+
+const app = express();
 const port = 3000;
-const jwtSecret = process.env.JWT_SECRET;
+const jwtSecret = process.env.JWT_SECRET || 'fallback_secret';
 app.use(express.json());
 
+// --- CONFIGURACIÓN DEL CLIENTE ---
 const client = new Client({
     authStrategy: new LocalAuth(),
+    // Esto soluciona el error "Cannot read properties of undefined (reading 'getChat')"
+    webVersionCache: {
+        type: 'remote',
+        remotePath: 'https://raw.githubusercontent.com/wppconnect-team/wa-version-utils/main/versions/2.2412.54.json',
+    },
     puppeteer: { 
         headless: true,
-        args: ['--no-sandbox', '--disable-setuid-sandbox']
+        args: [
+            '--no-sandbox', 
+            '--disable-setuid-sandbox',
+            '--disable-dev-shm-usage',
+            '--disable-extensions'
+        ]
     }
 });
 
+let qrCodeData = null;
 
-// client initialize does not finish at ready now.
+// --- EVENTOS DE WHATSAPP ---
 
 client.on('loading_screen', (percent, message) => {
     console.log('LOADING SCREEN', percent, message);
 });
-let qrCodeData = null; 
-// Pairing code only needs to be requested once
-let pairingCodeRequested = false;
-client.on('qr', async (qr) => {
-    // NOTE: This event will not be fired if a session is specified.
-    console.log('QR RECEIVED', qr);
-    qrCodeData = await qr;
-  
+
+client.on('qr', (qr) => {
+    console.log('NUEVO QR RECIBIDO');
+    qrCodeData = qr; 
 });
 
 client.on('authenticated', () => {
-    console.log('AUTHENTICATED');
+    console.log('AUTENTICADO CORRECTAMENTE');
+    qrCodeData = null; // Limpiar QR una vez autenticado
 });
 
 client.on('auth_failure', msg => {
-    // Fired if session restore was unsuccessful
-    console.error('AUTHENTICATION FAILURE', msg);
+    console.error('ERROR DE AUTENTICACIÓN', msg);
 });
 
 client.on('ready', async () => {
-    console.log('READY');
+    console.log('CLIENTE LISTO');
     const debugWWebVersion = await client.getWWebVersion();
-    console.log(`WWebVersion = ${debugWWebVersion}`);
-    client.pupPage.on('pageerror', function(err) {
-        console.log('Page error: ' + err.toString());
-    });
-    client.pupPage.on('error', function(err) {
-        console.log('Page error: ' + err.toString());
-    });
-    
+    console.log(`Versión de WWeb: ${debugWWebVersion}`);
 });
 
 client.on('message', async msg => {
-    console.log('MESSAGE RECEIVED', msg);
-
-    if (msg.body === '!ping reply') {
-        // Send a new message as a reply to the current one
-        msg.reply('pong');
-
-    } else if (msg.body === '!ping') {
-        // Send a new message to the same chat
+    // Comandos básicos de respuesta
+    if (msg.body === '!ping') {
         client.sendMessage(msg.from, 'pong');
-
-    } else if (msg.body.startsWith('!sendto ')) {
-        // Direct send a new message to specific id
-        let number = msg.body.split(' ')[1];
-        let messageIndex = msg.body.indexOf(number) + number.length;
-        let message = msg.body.slice(messageIndex, msg.body.length);
-        number = number.includes('@c.us') ? number : `${number}@c.us`;
-        let chat = await msg.getChat();
-        chat.sendSeen();
-        client.sendMessage(number, message);
-
-    } else if (msg.body.startsWith('!subject ')) {
-        // Change the group subject
-        let chat = await msg.getChat();
-        if (chat.isGroup) {
-            let newSubject = msg.body.slice(9);
-            chat.setSubject(newSubject);
-        } else {
-            msg.reply('This command can only be used in a group!');
-        }
-    } else if (msg.body.startsWith('!echo ')) {
-        // Replies with the same message
-        msg.reply(msg.body.slice(6));
-    } else if (msg.body.startsWith('!preview ')) {
-        const text = msg.body.slice(9);
-        msg.reply(text, null, { linkPreview: true });
-    } else if (msg.body.startsWith('!desc ')) {
-        // Change the group description
-        let chat = await msg.getChat();
-        if (chat.isGroup) {
-            let newDescription = msg.body.slice(6);
-            chat.setDescription(newDescription);
-        } else {
-            msg.reply('This command can only be used in a group!');
-        }
-    } else if (msg.body === '!leave') {
-        // Leave the group
-        let chat = await msg.getChat();
-        if (chat.isGroup) {
-            chat.leave();
-        } else {
-            msg.reply('This command can only be used in a group!');
-        }
-    } else if (msg.body.startsWith('!join ')) {
-        const inviteCode = msg.body.split(' ')[1];
-        try {
-            await client.acceptInvite(inviteCode);
-            msg.reply('Joined the group!');
-        } catch (e) {
-            msg.reply('That invite code seems to be invalid.');
-        }
-    } else if (msg.body.startsWith('!addmembers')) {
-        const group = await msg.getChat();
-        const result = await group.addParticipants(['number1@c.us', 'number2@c.us', 'number3@c.us']);
-        /**
-         * The example of the {@link result} output:
-         *
-         * {
-         *   'number1@c.us': {
-         *     code: 200,
-         *     message: 'The participant was added successfully',
-         *     isInviteV4Sent: false
-         *   },
-         *   'number2@c.us': {
-         *     code: 403,
-         *     message: 'The participant can be added by sending private invitation only',
-         *     isInviteV4Sent: true
-         *   },
-         *   'number3@c.us': {
-         *     code: 404,
-         *     message: 'The phone number is not registered on WhatsApp',
-         *     isInviteV4Sent: false
-         *   }
-         * }
-         *
-         * For more usage examples:
-         * @see https://github.com/pedroslopez/whatsapp-web.js/pull/2344#usage-example1
-         */
-        console.log(result);
-    } else if (msg.body === '!creategroup') {
-        const partitipantsToAdd = ['number1@c.us', 'number2@c.us', 'number3@c.us'];
-        const result = await client.createGroup('Group Title', partitipantsToAdd);
-        /**
-         * The example of the {@link result} output:
-         * {
-         *   title: 'Group Title',
-         *   gid: {
-         *     server: 'g.us',
-         *     user: '1111111111',
-         *     _serialized: '1111111111@g.us'
-         *   },
-         *   participants: {
-         *     'botNumber@c.us': {
-         *       statusCode: 200,
-         *       message: 'The participant was added successfully',
-         *       isGroupCreator: true,
-         *       isInviteV4Sent: false
-         *     },
-         *     'number1@c.us': {
-         *       statusCode: 200,
-         *       message: 'The participant was added successfully',
-         *       isGroupCreator: false,
-         *       isInviteV4Sent: false
-         *     },
-         *     'number2@c.us': {
-         *       statusCode: 403,
-         *       message: 'The participant can be added by sending private invitation only',
-         *       isGroupCreator: false,
-         *       isInviteV4Sent: true
-         *     },
-         *     'number3@c.us': {
-         *       statusCode: 404,
-         *       message: 'The phone number is not registered on WhatsApp',
-         *       isGroupCreator: false,
-         *       isInviteV4Sent: false
-         *     }
-         *   }
-         * }
-         *
-         * For more usage examples:
-         * @see https://github.com/pedroslopez/whatsapp-web.js/pull/2344#usage-example2
-         */
-        console.log(result);
-    } else if (msg.body === '!groupinfo') {
-        let chat = await msg.getChat();
-        if (chat.isGroup) {
-            msg.reply(`
-                *Group Details*
-                Name: ${chat.name}
-                Description: ${chat.description}
-                Created At: ${chat.createdAt.toString()}
-                Created By: ${chat.owner.user}
-                Participant count: ${chat.participants.length}
-            `);
-        } else {
-            msg.reply('This command can only be used in a group!');
-        }
-    } else if (msg.body === '!chats') {
-        const chats = await client.getChats();
-        client.sendMessage(msg.from, `The bot has ${chats.length} chats open.`);
-    } else if (msg.body === '!info') {
-        let info = client.info;
-        client.sendMessage(msg.from, `
-            *Connection info*
-            User name: ${info.pushname}
-            My number: ${info.wid.user}
-            Platform: ${info.platform}
-        `);
-    } else if (msg.body === '!mediainfo' && msg.hasMedia) {
-        const attachmentData = await msg.downloadMedia();
-        msg.reply(`
-            *Media info*
-            MimeType: ${attachmentData.mimetype}
-            Filename: ${attachmentData.filename}
-            Data (length): ${attachmentData.data.length}
-        `);
-    } else if (msg.body === '!quoteinfo' && msg.hasQuotedMsg) {
-        const quotedMsg = await msg.getQuotedMessage();
-
-        quotedMsg.reply(`
-            ID: ${quotedMsg.id._serialized}
-            Type: ${quotedMsg.type}
-            Author: ${quotedMsg.author || quotedMsg.from}
-            Timestamp: ${quotedMsg.timestamp}
-            Has Media? ${quotedMsg.hasMedia}
-        `);
-    } else if (msg.body === '!resendmedia' && msg.hasQuotedMsg) {
-        const quotedMsg = await msg.getQuotedMessage();
-        if (quotedMsg.hasMedia) {
-            const attachmentData = await quotedMsg.downloadMedia();
-            client.sendMessage(msg.from, attachmentData, { caption: 'Here\'s your requested media.' });
-        }
-        if (quotedMsg.hasMedia && quotedMsg.type === 'audio') {
-            const audio = await quotedMsg.downloadMedia();
-            await client.sendMessage(msg.from, audio, { sendAudioAsVoice: true });
-        }
-    } else if (msg.body === '!isviewonce' && msg.hasQuotedMsg) {
-        const quotedMsg = await msg.getQuotedMessage();
-        if (quotedMsg.hasMedia) {
-            const media = await quotedMsg.downloadMedia();
-            await client.sendMessage(msg.from, media, { isViewOnce: true });
-        }
-    } else if (msg.body === '!location') {
-        // only latitude and longitude
-        await msg.reply(new Location(37.422, -122.084));
-        // location with name only
-        await msg.reply(new Location(37.422, -122.084, { name: 'Googleplex' }));
-        // location with address only
-        await msg.reply(new Location(37.422, -122.084, { address: '1600 Amphitheatre Pkwy, Mountain View, CA 94043, USA' }));
-        // location with name, address and url
-        await msg.reply(new Location(37.422, -122.084, { name: 'Googleplex', address: '1600 Amphitheatre Pkwy, Mountain View, CA 94043, USA', url: 'https://google.com' }));
-    } else if (msg.location) {
-        msg.reply(msg.location);
-    } else if (msg.body.startsWith('!status ')) {
-        const newStatus = msg.body.split(' ')[1];
-        await client.setStatus(newStatus);
-        msg.reply(`Status was updated to *${newStatus}*`);
-    } else if (msg.body === '!mentionUsers') {
-        const chat = await msg.getChat();
-        const userNumber = 'XXXXXXXXXX';
-        /**
-         * To mention one user you can pass user's ID to 'mentions' property as is,
-         * without wrapping it in Array, and a user's phone number to the message body:
-         */
-        await chat.sendMessage(`Hi @${userNumber}`, {
-            mentions: userNumber + '@c.us'
-        });
-        // To mention a list of users:
-        await chat.sendMessage(`Hi @${userNumber}, @${userNumber}`, {
-            mentions: [userNumber + '@c.us', userNumber + '@c.us']
-        });
-    } else if (msg.body === '!mentionGroups') {
-        const chat = await msg.getChat();
-        const groupId = 'YYYYYYYYYY@g.us';
-        /**
-         * Sends clickable group mentions, the same as user mentions.
-         * When the mentions are clicked, it opens a chat with the mentioned group.
-         * The 'groupMentions.subject' can be custom
-         * 
-         * @note The user that does not participate in the mentioned group,
-         * will not be able to click on that mentioned group, the same if the group does not exist
-         *
-         * To mention one group:
-         */
-        await chat.sendMessage(`Check the last message here: @${groupId}`, {
-            groupMentions: { subject: 'GroupSubject', id: groupId }
-        });
-        // To mention a list of groups:
-        await chat.sendMessage(`Check the last message in these groups: @${groupId}, @${groupId}`, {
-            groupMentions: [
-                { subject: 'FirstGroup', id: groupId },
-                { subject: 'SecondGroup', id: groupId }
-            ]
-        });
-    } else if (msg.body === '!getGroupMentions') {
-        // To get group mentions from a message:
-        const groupId = 'ZZZZZZZZZZ@g.us';
-        const msg = await client.sendMessage('chatId', `Check the last message here: @${groupId}`, {
-            groupMentions: { subject: 'GroupSubject', id: groupId }
-        });
-        /** {@link groupMentions} is an array of `GroupChat` */
-        const groupMentions = await msg.getGroupMentions();
-        console.log(groupMentions);
-    } else if (msg.body === '!delete') {
-        if (msg.hasQuotedMsg) {
-            const quotedMsg = await msg.getQuotedMessage();
-            if (quotedMsg.fromMe) {
-                quotedMsg.delete(true);
-            } else {
-                msg.reply('I can only delete my own messages');
-            }
-        }
-    } else if (msg.body === '!pin') {
-        const chat = await msg.getChat();
-        await chat.pin();
-    } else if (msg.body === '!archive') {
-        const chat = await msg.getChat();
-        await chat.archive();
-    } else if (msg.body === '!mute') {
-        const chat = await msg.getChat();
-        // mute the chat for 20 seconds
-        const unmuteDate = new Date();
-        unmuteDate.setSeconds(unmuteDate.getSeconds() + 20);
-        await chat.mute(unmuteDate);
-    } else if (msg.body === '!typing') {
-        const chat = await msg.getChat();
-        // simulates typing in the chat
-        chat.sendStateTyping();
-    } else if (msg.body === '!recording') {
-        const chat = await msg.getChat();
-        // simulates recording audio in the chat
-        chat.sendStateRecording();
-    } else if (msg.body === '!clearstate') {
-        const chat = await msg.getChat();
-        // stops typing or recording in the chat
-        chat.clearState();
-    } else if (msg.body === '!jumpto') {
-        if (msg.hasQuotedMsg) {
-            const quotedMsg = await msg.getQuotedMessage();
-            client.interface.openChatWindowAt(quotedMsg.id._serialized);
-        }
-    } else if (msg.body === '!buttons') {
-        let button = new Buttons('Button body', [{ body: 'bt1' }, { body: 'bt2' }, { body: 'bt3' }], 'title', 'footer');
-        client.sendMessage(msg.from, button);
-    } else if (msg.body === '!list') {
-        let sections = [
-            { title: 'sectionTitle', rows: [{ title: 'ListItem1', description: 'desc' }, { title: 'ListItem2' }] }
-        ];
-        let list = new List('List body', 'btnText', sections, 'Title', 'footer');
-        client.sendMessage(msg.from, list);
-    } else if (msg.body === '!reaction') {
-        msg.react('👍');
-    } else if (msg.body === '!sendpoll') {
-        /** By default the poll is created as a single choice poll: */
-        await msg.reply(new Poll('Winter or Summer?', ['Winter', 'Summer']));
-        /** If you want to provide a multiple choice poll, add allowMultipleAnswers as true: */
-        await msg.reply(new Poll('Cats or Dogs?', ['Cats', 'Dogs'], { allowMultipleAnswers: true }));
-        /**
-         * You can provide a custom message secret, it can be used as a poll ID:
-         * @note It has to be a unique vector with a length of 32
-         */
-        await msg.reply(
-            new Poll('Cats or Dogs?', ['Cats', 'Dogs'], {
-                messageSecret: [
-                    1, 2, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
-                ]
-            })
-        );
-    } else if (msg.body === '!edit') {
-        if (msg.hasQuotedMsg) {
-            const quotedMsg = await msg.getQuotedMessage();
-            if (quotedMsg.fromMe) {
-                quotedMsg.edit(msg.body.replace('!edit', ''));
-            } else {
-                msg.reply('I can only edit my own messages');
-            }
-        }
-    } else if (msg.body === '!updatelabels') {
-        const chat = await msg.getChat();
-        await chat.changeLabels([0, 1]);
-    } else if (msg.body === '!addlabels') {
-        const chat = await msg.getChat();
-        let labels = (await chat.getLabels()).map((l) => l.id);
-        labels.push('0');
-        labels.push('1');
-        await chat.changeLabels(labels);
-    } else if (msg.body === '!removelabels') {
-        const chat = await msg.getChat();
-        await chat.changeLabels([]);
-    } else if (msg.body === '!approverequest') {
-        /**
-         * Presented an example for membership request approvals, the same examples are for the request rejections.
-         * To approve the membership request from a specific user:
-         */
-        await client.approveGroupMembershipRequests(msg.from, { requesterIds: 'number@c.us' });
-        /** The same for execution on group object (no need to provide the group ID): */
-        const group = await msg.getChat();
-        await group.approveGroupMembershipRequests({ requesterIds: 'number@c.us' });
-        /** To approve several membership requests: */
-        const approval = await client.approveGroupMembershipRequests(msg.from, {
-            requesterIds: ['number1@c.us', 'number2@c.us']
-        });
-        /**
-         * The example of the {@link approval} output:
-         * [
-         *   {
-         *     requesterId: 'number1@c.us',
-         *     message: 'Rejected successfully'
-         *   },
-         *   {
-         *     requesterId: 'number2@c.us',
-         *     error: 404,
-         *     message: 'ParticipantRequestNotFoundError'
-         *   }
-         * ]
-         *
-         */
-        console.log(approval);
-        /** To approve all the existing membership requests (simply don't provide any user IDs): */
-        await client.approveGroupMembershipRequests(msg.from);
-        /** To change the sleep value to 300 ms: */
-        await client.approveGroupMembershipRequests(msg.from, {
-            requesterIds: ['number1@c.us', 'number2@c.us'],
-            sleep: 300
-        });
-        /** To change the sleep value to random value between 100 and 300 ms: */
-        await client.approveGroupMembershipRequests(msg.from, {
-            requesterIds: ['number1@c.us', 'number2@c.us'],
-            sleep: [100, 300]
-        });
-        /** To explicitly disable the sleep: */
-        await client.approveGroupMembershipRequests(msg.from, {
-            requesterIds: ['number1@c.us', 'number2@c.us'],
-            sleep: null
-        });
-    } else if (msg.body === '!pinmsg') {
-        /**
-         * Pins a message in a chat, a method takes a number in seconds for the message to be pinned.
-         * WhatsApp default values for duration to pass to the method are:
-         * 1. 86400 for 24 hours
-         * 2. 604800 for 7 days
-         * 3. 2592000 for 30 days
-         * You can pass your own value:
-         */
-        const result = await msg.pin(60); // Will pin a message for 1 minute
-        console.log(result); // True if the operation completed successfully, false otherwise
-    } else if (msg.body === '!howManyConnections') {
-        /**
-         * Get user device count by ID
-         * Each WaWeb Connection counts as one device, and the phone (if exists) counts as one
-         * So for a non-enterprise user with one WaWeb connection it should return "2"
-         */
-        let deviceCount = await client.getContactDeviceCount(msg.from);
-        await msg.reply(`You have *${deviceCount}* devices connected`);
-    } else if (msg.body === '!syncHistory') {
-        const isSynced = await client.syncHistory(msg.from);
-        // Or through the Chat object:
-        // const chat = await client.getChatById(msg.from);
-        // const isSynced = await chat.syncHistory();
-        
-        await msg.reply(isSynced ? 'Historical chat is syncing..' : 'There is no historical chat to sync.');
-    } else if (msg.body === '!statuses') {
-        const statuses = await client.getBroadcasts();
-        console.log(statuses);
-        const chat = await statuses[0]?.getChat(); // Get user chat of a first status
-        console.log(chat);
     }
-});
-
-client.on('message_create', async (msg) => {
-    console.log(msg,"CREADO");
-    // msg.reply('pong');
-    // Fired on all message creations, including your own
-    if (msg.fromMe) {
-        // do stuff here
+    
+    if (msg.body.startsWith('!sendto ')) {
+        let [_, number, ...messageParts] = msg.body.split(' ');
+        let message = messageParts.join(' ');
+        let formattedNumber = number.includes('@c.us') ? number : `${number}@c.us`;
+        client.sendMessage(formattedNumber, message);
     }
-
-    // Unpins a message
-    if (msg.fromMe && msg.body.startsWith('!unpin')) {
-        const pinnedMsg = await msg.getQuotedMessage();
-        console.log('pin',pinnedMsg)
-        if (pinnedMsg) {
-            // Will unpin a message
-            const result = await pinnedMsg.unpin();
-            console.log(result); // True if the operation completed successfully, false otherwise
-        }
-    }
-});
-
-
-client.on('message_revoke_everyone', async (after, before) => {
-    // Fired whenever a message is deleted by anyone (including you)
-    console.log("ANTES DELETE",after); // message after it was deleted.
-    if (before) {
-        console.log("ANTES DESPUES",before); // message before it was deleted.
-    }
-});
-
-client.on('message_revoke_me', async (msg) => {
-    // Fired whenever a message is only deleted in your own view.
-    console.log(msg.body); // message before it was deleted.
-});
-
-let rejectCalls = true;
-
-client.on('call', async (call) => {
-    console.log('Call received, rejecting. GOTO Line 261 to disable', call);
-    if (rejectCalls) await call.reject();
-    await client.sendMessage(call.from, `[${call.fromMe ? 'Outgoing' : 'Incoming'}] Phone call from ${call.from}, type ${call.isGroup ? 'group' : ''} ${call.isVideo ? 'video' : 'audio'} call. ${rejectCalls ? 'This call was automatically rejected by the script.' : ''}`);
 });
 
 client.on('disconnected', async (reason) => {
-    console.log('Client was logged out', reason);
+    console.log('Cliente desconectado', reason);
     qrCodeData = null;
-  
-    try {
-        console.log('Iniciando de nuevo el flujo de autenticación...');
-        await startWhatsAppFlow(); // Método que contiene el flujo para inicializar el cliente
-        exec('pm2 restart all', (err, stdout, stderr) => {
-            if (err) {
-                console.error(`Error al reiniciar el servicio: ${err.message}`);
-                return;
-            }
-            console.log(`Servicio reiniciado con éxito: ${stdout}`);
-        });
-        
-       
-    } catch (error) {
-        console.error('Error reiniciando el flujo:', error);
-        exec('pm2 restart all', (err, stdout, stderr) => {
-            if (err) {
-                console.error(`Error al reiniciar el servicio: ${err.message}`);
-                return;
-            }
-            console.log(`Servicio reiniciado con éxito: ${stdout}`);
-        });
-    }
+    // Intento de reinicio automático vía PM2 si está disponible
+    setTimeout(() => {
+        exec('pm2 restart all');
+    }, 5000);
 });
+
+// --- MIDDLEWARE Y RUTAS API ---
+
 const authenticateToken = (req, res, next) => {
-    const token = req.headers['authorization']?.split(' ')[1]; // Obtener el token del encabezado
+    const token = req.headers['authorization']?.split(' ')[1];
+    if (!token) return res.sendStatus(401);
 
-    if (!token) return res.sendStatus(401); // Si no hay token, devuelve un 401
-
-    jwt.verify(token, jwtSecret , (err, user) => { // Reemplaza 'tu_secreto' con tu clave secreta
-        if (err) return res.sendStatus(403); // Si el token no es válido, devuelve un 403
-        req.user = user; // Almacena el usuario en la solicitud
-        next(); // Continúa a la siguiente función de middleware o ruta
+    jwt.verify(token, jwtSecret, (err, user) => {
+        if (err) return res.sendStatus(403);
+        req.user = user;
+        next();
     });
 };
-app.post('/send-message',authenticateToken, async (req, res) => {
+
+app.post('/login', (req, res) => {
+    const { username } = req.body;
+    if(username === 'vicenteriverodexa') {
+        const user = { name: username };
+        const accessToken = jwt.sign(user, jwtSecret);
+        return res.json({ accessToken });
+    }
+    res.sendStatus(401);
+});
+
+app.get('/qr', authenticateToken, (req, res) => {
+    if (qrCodeData) {
+        qrcode.toDataURL(qrCodeData, (err, src) => {
+            if (err) return res.status(500).send('Error generando QR');
+            res.send(`<html><body><h1>Escanea el QR</h1><img src="${src}" /></body></html>`);
+        });
+    } else {
+        res.send('QR no disponible. El cliente ya podría estar conectado.');
+    }
+});
+
+app.post('/send-message', authenticateToken, async (req, res) => {
     const { number, message, mediaUrl } = req.body;
 
     try {
+        // Formato para México (52 + 1 + número)
         const chatId = `521${number}@c.us`;
 
         if (mediaUrl) {
-            // Descargar el archivo multimedia desde la URL
-            const response = await axios.get(mediaUrl, {
-                responseType: 'arraybuffer'
-            });
-
-            // Obtener el tipo MIME del archivo
-            const mimeType = mime.lookup(mediaUrl);
-            // console.log(mimeType)
-            if (!mimeType) {
-                throw new Error('Tipo MIME no válido o no soportado.');
-            }
-
-            // Convierte el archivo descargado a base64
-            const media = new MessageMedia(mimeType, response.data.toString('base64'));
-
-            // Envía el archivo multimedia (imagen, video, gif) con un mensaje opcional como caption
+            const response = await axios.get(mediaUrl, { responseType: 'arraybuffer' });
+            const mimeType = mime.lookup(mediaUrl) || 'image/jpeg';
+            const media = new MessageMedia(mimeType, Buffer.from(response.data).toString('base64'));
+            
             await client.sendMessage(chatId, media, { caption: message || '' });
-
-            // Retorna la respuesta y finaliza la ejecución
-            return res.status(200).json({ status: 'success', message: 'Archivo multimedia enviado correctamente' });
         } else {
-            // Envía solo el mensaje de texto
             await client.sendMessage(chatId, message);
-
-            // Retorna la respuesta y finaliza la ejecución
-            return res.status(200).json({ status: 'success', message: 'Mensaje enviado correctamente' });
         }
 
+        res.status(200).json({ status: 'success', message: 'Enviado correctamente' });
     } catch (error) {
-        console.error('Error enviando el mensaje:', error);
+        console.error('Error en send-message:', error);
+        res.status(500).json({ status: 'error', message: error.message });
+    }
+});
 
-        // Retorna la respuesta en caso de error y finaliza la ejecución
-        return res.status(500).json({ status: 'error', message: 'Error enviando el mensaje' });
-    }
-});
-app.get('/qr',authenticateToken, (req, res) => {
-    if (qrCodeData) {
-        // Si hay un QR disponible, generamos una imagen y la enviamos como respuesta
-        qrcode.toDataURL(qrCodeData, (err, src) => {
-            if (err) {
-                console.error('Error generating QR code:', err);
-                res.status(500).send('Error generating QR code');
-            } else {
-                // Enviamos la imagen como una etiqueta <img> en la respuesta
-                res.send(`
-                    <html>
-                        <body>
-                            <h1>Escanea el código QR con WhatsApp</h1>
-                            <img src="${src}" alt="QR Code" />
-                        </body>
-                    </html>
-                `);
-            }
-        });
-    } else {
-        res.send('QR code no disponible en este momento.');
-    }
-});
-const deleteFolders = (folderPath) => {
+// --- FUNCIONES DE LIMPIEZA Y ARRANQUE ---
+
+const deleteFoldersSync = (folderPath) => {
     if (fs.existsSync(folderPath)) {
-        let deleteCommand;
-        if (process.platform === 'win32') {
-            // Para Windows
-            deleteCommand = `rmdir /s /q "${folderPath}"`;
-        } else {
-            // Para Linux/macOS
-            deleteCommand = `rm -rf "${folderPath}"`;
+        try {
+            // Uso de fs.rmSync para asegurar que se borre antes de seguir
+            fs.rmSync(folderPath, { recursive: true, force: true });
+            console.log(`Eliminado: ${folderPath}`);
+        } catch (err) {
+            console.error(`No se pudo eliminar ${folderPath}:`, err.message);
         }
-
-        exec(deleteCommand, (err, stdout, stderr) => {
-            if (err) {
-                console.error(`Error al eliminar la carpeta ${folderPath}: ${err.message}`);
-                return;
-            }
-            console.log(`Carpeta eliminada con éxito: ${folderPath}`);
-        });
-    } else {
-        console.log(`La carpeta ${folderPath} no existe.`);
     }
 };
 
-function generateSecret(length = 32) {
-    return crypto.randomBytes(length).toString('hex'); // Genera un secreto aleatorio
-}
-
-const secret = generateSecret();
-console.log(`Generated secret: ${secret}`);
-
-app.post('/login', (req, res) => {
-    // Aquí debes validar las credenciales del usuario
-    const username = req.body.username;
-    if(username == 'vicenteriverodexa'){
-
-        const user = { name: username }; // Crea un objeto de usuario
-        
-        const accessToken = jwt.sign(user, jwtSecret ); // Genera el token
-        res.json({ accessToken }); // Devuelve el token al cliente
-    }
-    return res.sendStatus(401)
-});
-
 app.listen(port, () => {
+    console.log(`Servidor API en puerto ${port}`);
+    
     const authFolderPath = path.join(__dirname, '.wwebjs_auth');
     const cacheFolderPath = path.join(__dirname, '.wwebjs_cache');
-    
- 
-    // Eliminar ambas carpetas
-    deleteFolders(authFolderPath);
-    deleteFolders(cacheFolderPath);
-    
-    // Reiniciar el servicio después de eliminar las carpetas
-    // exec('pm2 restart all', (err, stdout, stderr) => {
-    //     if (err) {
-    //         console.error(`Error al reiniciar el servicio: ${err.message}`);
-    //         return;
-    //     }
-    //     console.log(`Servicio reiniciado con éxito: ${stdout}`);
-    // });
-    client.initialize();
 
-    console.log(`Servidor ejecutándose en http://localhost:${port}`);
+    // Limpiamos carpetas para evitar conflictos de sesión corrupta
+    deleteFoldersSync(authFolderPath);
+    deleteFoldersSync(cacheFolderPath);
+
+    // Inicialización del cliente de WhatsApp
+    client.initialize().catch(err => console.error("Error al inicializar cliente:", err));
 });
-// client.on('contact_changed', async (message, oldId, newId, isContact) => {
-//     /** The time the event occurred. */
-//     const eventTime = (new Date(message.timestamp * 1000)).toLocaleString();
-
-//     console.log(
-//         `The contact ${oldId.slice(0, -5)}` +
-//         `${!isContact ? ' that participates in group ' +
-//             `${(await client.getChatById(message.to ?? message.from)).name} ` : ' '}` +
-//         `changed their phone number\nat ${eventTime}.\n` +
-//         `Their new phone number is ${newId.slice(0, -5)}.\n`);
-
-//     /**
-//      * Information about the @param {message}:
-//      * 
-//      * 1. If a notification was emitted due to a group participant changing their phone number:
-//      * @param {message.author} is a participant's id before the change.
-//      * @param {message.recipients[0]} is a participant's id after the change (a new one).
-//      * 
-//      * 1.1 If the contact who changed their number WAS in the current user's contact list at the time of the change:
-//      * @param {message.to} is a group chat id the event was emitted in.
-//      * @param {message.from} is a current user's id that got an notification message in the group.
-//      * Also the @param {message.fromMe} is TRUE.
-//      * 
-//      * 1.2 Otherwise:
-//      * @param {message.from} is a group chat id the event was emitted in.
-//      * @param {message.to} is @type {undefined}.
-//      * Also @param {message.fromMe} is FALSE.
-//      * 
-//      * 2. If a notification was emitted due to a contact changing their phone number:
-//      * @param {message.templateParams} is an array of two user's ids:
-//      * the old (before the change) and a new one, stored in alphabetical order.
-//      * @param {message.from} is a current user's id that has a chat with a user,
-//      * whos phone number was changed.
-//      * @param {message.to} is a user's id (after the change), the current user has a chat with.
-//      */
-// });
-
-// client.on('group_admin_changed', (notification) => {
-//     if (notification.type === 'promote') {
-//         /** 
-//           * Emitted when a current user is promoted to an admin.
-//           * {@link notification.author} is a user who performs the action of promoting/demoting the current user.
-//           */
-//         console.log(`You were promoted by ${notification.author}`);
-//     } else if (notification.type === 'demote')
-//         /** Emitted when a current user is demoted to a regular user. */
-//         console.log(`You were demoted by ${notification.author}`);
-// });
-
-// client.on('group_membership_request', async (notification) => {
-//     /**
-//      * The example of the {@link notification} output:
-//      * {
-//      *     id: {
-//      *         fromMe: false,
-//      *         remote: 'groupId@g.us',
-//      *         id: '123123123132132132',
-//      *         participant: 'number@c.us',
-//      *         _serialized: 'false_groupId@g.us_123123123132132132_number@c.us'
-//      *     },
-//      *     body: '',
-//      *     type: 'created_membership_requests',
-//      *     timestamp: 1694456538,
-//      *     chatId: 'groupId@g.us',
-//      *     author: 'number@c.us',
-//      *     recipientIds: []
-//      * }
-//      *
-//      */
-//     console.log(notification);
-//     /** You can approve or reject the newly appeared membership request: */
-//     await client.approveGroupMembershipRequestss(notification.chatId, notification.author);
-//     await client.rejectGroupMembershipRequests(notification.chatId, notification.author);
-// });
-
-// client.on('message_reaction', async (reaction) => {
-//     console.log('REACTION RECEIVED', reaction);
-// });
-
-// client.on('vote_update', (vote) => {
-//     /** The vote that was affected: */
-//     console.log(vote);
-// });
