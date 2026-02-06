@@ -9,6 +9,7 @@ const crypto = require('crypto');
 const jwt = require('jsonwebtoken');
 require('dotenv').config();
 
+
 const { Client, Location, Poll, List, Buttons, LocalAuth, MessageMedia } = require('whatsapp-web.js');
 
 const app = express();
@@ -19,19 +20,11 @@ app.use(express.json());
 // --- CONFIGURACIÓN DEL CLIENTE ---
 const client = new Client({
     authStrategy: new LocalAuth(),
-    // Esto soluciona el error "Cannot read properties of undefined (reading 'getChat')"
-    webVersionCache: {
-        type: 'remote',
-        remotePath: 'https://raw.githubusercontent.com/wppconnect-team/wa-version-utils/main/versions/2.2412.54.json',
-    },
+    // proxyAuthentication: { username: 'username', password: 'password' },
     puppeteer: { 
+        // args: ['--proxy-server=proxy-server-that-requires-authentication.example.com'],
         headless: true,
-        args: [
-            '--no-sandbox', 
-            '--disable-setuid-sandbox',
-            '--disable-dev-shm-usage',
-            '--disable-extensions'
-        ]
+        args: ['--no-sandbox', '--disable-setuid-sandbox']
     }
 });
 
@@ -65,16 +58,17 @@ client.on('ready', async () => {
 
 client.on('message', async msg => {
     // Comandos básicos de respuesta
-    if (msg.body === '!ping') {
-        client.sendMessage(msg.from, 'pong');
-    }
+    console.log('MESSAGE RECEIVED', msg);
+    // if (msg.body === '!ping') {
+    //     client.sendMessage(msg.from, 'pong');
+    // }
     
-    if (msg.body.startsWith('!sendto ')) {
-        let [_, number, ...messageParts] = msg.body.split(' ');
-        let message = messageParts.join(' ');
-        let formattedNumber = number.includes('@c.us') ? number : `${number}@c.us`;
-        client.sendMessage(formattedNumber, message);
-    }
+    // if (msg.body.startsWith('!sendto ')) {
+    //     let [_, number, ...messageParts] = msg.body.split(' ');
+    //     let message = messageParts.join(' ');
+    //     let formattedNumber = number.includes('@c.us') ? number : `${number}@c.us`;
+    //     client.sendMessage(formattedNumber, message);
+    // }
 });
 
 client.on('disconnected', async (reason) => {
@@ -143,7 +137,48 @@ app.post('/send-message', authenticateToken, async (req, res) => {
         res.status(500).json({ status: 'error', message: error.message });
     }
 });
+app.post('/send-group-by-name', authenticateToken, async (req, res) => {
+    const { groupName, message, mediaUrl } = req.body;
 
+    try {
+        // En lugar de getChats(), obtenemos los diálogos activos
+        // Si falla, intentamos una estrategia de búsqueda por iteración
+        const chats = await client.getChats(); 
+        
+        let targetGroup = chats.find(chat => 
+            chat.isGroup && chat.name.toLowerCase() === groupName.toLowerCase()
+        );
+
+        if (!targetGroup) {
+            return res.status(404).json({ 
+                status: 'error', 
+                message: `No se encontró el grupo "${groupName}". Asegúrate de que el bot tenga un mensaje reciente en ese grupo.` 
+            });
+        }
+
+        const chatId = targetGroup.id._serialized;
+
+        if (mediaUrl) {
+            const response = await axios.get(mediaUrl, { responseType: 'arraybuffer' });
+            const media = new MessageMedia(
+                mime.lookup(mediaUrl) || 'image/jpeg', 
+                Buffer.from(response.data).toString('base64')
+            );
+            await client.sendMessage(chatId, media, { caption: message });
+        } else {
+            await client.sendMessage(chatId, message);
+        }
+
+        res.json({ status: 'success', group: targetGroup.name, id: chatId });
+
+    } catch (error) {
+        console.error('Error detallado:', error);
+        res.status(500).json({ 
+            status: 'error', 
+            message: "Error de sincronización con WhatsApp. Intenta enviar un mensaje manual al grupo primero." 
+        });
+    }
+});
 // --- FUNCIONES DE LIMPIEZA Y ARRANQUE ---
 
 const deleteFoldersSync = (folderPath) => {
